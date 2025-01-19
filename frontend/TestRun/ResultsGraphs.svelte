@@ -1,67 +1,45 @@
-<script>
-    import {createEventDispatcher, onMount} from "svelte";
+<script lang="ts">
+    import {createEventDispatcher} from "svelte";
+    import queryString from "query-string";
     import {sendMessage} from "../Stores/AlertStore";
     import ResultsGraph from "./ResultsGraph.svelte";
+    import Filters from "./Components/Filters.svelte";
+    import {faMinus, faPlus} from "@fortawesome/free-solid-svg-icons";
+    import Fa from "svelte-fa";
     import GraphFilters from "./Components/GraphFilters.svelte";
-    import dayjs from "dayjs";
-    import queryString from "query-string";
 
-    export let test_id = "";
-    let graphs = [];
-    let ticks = {};
-    let releasesFilters = {};
-    let tableFilters = [];
-    let columnFilters = [];
-    let selectedTableFilters = [];
-    let selectedColumnFilters = [];
-    let filteredGraphs = [];
+    export let test_id: string = "";
+    let graphs: any[] = [];
+    let allGraphs: any[] = [];
+    let filteredGraphs: any[] = [];
+    let releasesFilters: Record<string, boolean> = {};
+    let ticks: Record<string, any> = {};
+    let width = 500;
+    let height = 300;
     let startDate = "";
     let endDate = "";
     let dateRange = 6;
     let showCustomInputs = false;
-    let width = 500;  // default width for each chart
-    let height = 300;  // default height for each chart
+    let graphViews: {
+        test_id: string;
+        id: string;
+        name: string;
+        description: string;
+        graphs: Record<string, any>;
+    }[] = [];
+    let showModal = false;
+    let activeTab = 0;
+    let form = {name: "", description: ""};
+    let showAddGraphModal = false;
+    let showRemoveGraphModal = false;
+    let selectedGraph: any;
+    let selectedView = "";
 
+    $: allTabs = ["All Graphs", ...graphViews.map((v) => v.name), "+ View"];
     const dispatch = createEventDispatcher();
 
     const dispatchRunClick = (e) => {
         dispatch("runClick", {runId: e.detail.runId});
-    };
-
-    const fetchTestResults = async function (testId) {
-        try {
-            const params = queryString.stringify({testId, startDate, endDate});
-            let res = await fetch(`/api/v1/test-results?${params}`);
-            if (res.status != 200) {
-                return Promise.reject(`HTTP Error ${res.status} trying to fetch test results`);
-            }
-            let results = await res.json();
-            if (results.status != "ok") {
-                return Promise.reject(`API Error: ${results.message}, while trying to fetch test results`);
-            }
-            const response = results["response"];
-            graphs = response["graphs"].map((graph) => ({...graph, id: generateRandomHash()}));
-            ticks = response["ticks"];
-            releasesFilters = Object.fromEntries(response["releases_filters"].map(key => [key, true]));
-            extractTableFilters();
-            extractColumnFilters();
-            filterGraphs();
-        } catch (error) {
-            if (error?.status === "error") {
-                sendMessage(
-                    "error",
-                    `API Error when fetching test run data.\nMessage: ${error.response.arguments[0]}`,
-                    "ResultsGraphs::fetchTestResults"
-                );
-            } else {
-                sendMessage(
-                    "error",
-                    "A backend error occurred during test results data fetch",
-                    "ResultsGraphs::fetchTestResults"
-                );
-                console.log(error);
-            }
-        }
     };
 
     const generateRandomHash = () => {
@@ -74,101 +52,152 @@
         fetchTestResults(test_id);
     };
 
+
+    async function fetchTestResults(testId: string) {
+        try {
+            const params = queryString.stringify({testId: testId, startDate, endDate});
+            const res = await fetch(`/api/v1/test-results?${params}`);
+            if (res.status !== 200) throw new Error(`HTTP Error ${res.status}`);
+
+            const data = await res.json();
+            if (data.status !== "ok") throw new Error(`API Error: ${data.message}`);
+
+            allGraphs = data.response.graphs.map((g: any) => ({
+                ...g,
+                id: generateRandomHash(),
+            }));
+            ticks = data.response.ticks;
+            graphs = allGraphs;
+            graphViews = data.response.graph_views;
+            releasesFilters = Object.fromEntries(
+                data.response.releases_filters.map((r: string) => [r, true])
+            );
+        } catch (e) {
+            sendMessage("error", "A backend error occurred", "ResultsGraphs::fetchTestResults");
+            console.error(e);
+        }
+    }
+
+    function handleTabClick(i: number) {
+        if (allTabs[i] === "+ View") showModal = true;
+        else activeTab = i;
+        if (activeTab > 0) graphs = Object.keys(graphViews[activeTab - 1].graphs).map((g) => getGraphsByName(g)[0]);
+        else graphs = allGraphs;
+    }
+
+    function closeModal() {
+        showModal = false;
+    }
+
+    function getGraphsByName(graphName: string) {
+        return allGraphs.filter((g) => g.options?.plugins?.title?.text === graphName);
+    }
+
+    function openAddGraphModal(g: any) {
+        selectedGraph = g;
+        showAddGraphModal = true;
+    }
+
+    function openRemoveGraphModal(g: any) {
+        selectedGraph = g;
+        showRemoveGraphModal = true;
+    }
+
+    function closeAddGraphModal() {
+        showAddGraphModal = false;
+    }
+
+    function closeRemoveGraphModal() {
+        showRemoveGraphModal = false;
+    }
+
+    async function saveNewView() {
+        const payload = {
+            testId: test_id,
+            name: form.name,
+            description: form.description,
+        };
+        try {
+            const res = await fetch("/api/v1/create-graph-view", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error(`Error: ${res.status}`);
+            const data = await res.json();
+            if (data.status !== "ok") throw new Error(data.message);
+
+            graphViews = [...graphViews, data.response];
+            form = {name: "", description: ""};
+            closeModal();
+        } catch (e) {
+            sendMessage("error", "Failed to create graph view", "saveNewView");
+        }
+    }
+
+    async function updateArgusGraphView(view: {
+        id: string;
+        name: string;
+        description: string;
+        graphs: Record<string, any>;
+    }) {
+        const payload = {
+            testId: test_id,
+            id: view.id,
+            name: view.name,
+            description: view.description,
+            graphs: view.graphs,
+        };
+
+        try {
+            const res = await fetch("/api/v1/update-graph-view", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error(`Error: ${res.status}`);
+            const data = await res.json();
+            if (data.status !== "ok") throw new Error(data.message);
+
+            const idx = graphViews.findIndex((v) => v.id === view.id);
+            if (idx !== -1) graphViews[idx] = data.response;
+        } catch (e) {
+            sendMessage("error", "Failed to update graph view", "updateArgusGraphView");
+        }
+    }
+
+    function addGraphToView() {
+        if (!selectedView) return;
+        const idx = graphViews.findIndex((v) => v.name === selectedView);
+        if (idx === -1) return;
+
+        graphViews[idx].graphs = {
+            ...graphViews[idx].graphs,
+            [selectedGraph.options.plugins.title.text]: "{}",
+        };
+
+        updateArgusGraphView(graphViews[idx]);
+        closeAddGraphModal();
+    }
+
+    function removeGraph() {
+        if (!selectedGraph) return;
+
+        const activeViewId = graphViews[activeTab - 1]?.id;
+        const idx = graphViews.findIndex((v) => v.id === activeViewId);
+        if (idx === -1) return;
+
+        const graphName = selectedGraph?.options?.plugins?.title?.text;
+        delete graphViews[idx].graphs[graphName];
+        graphs = Object.keys(graphViews[activeTab - 1].graphs).map((g) => getGraphsByName(g)[0]);
+
+        updateArgusGraphView(graphViews[idx]);
+        closeRemoveGraphModal();
+    }
     const handleReleaseChange = () => {
-        filterGraphs();
+        filteredGraphs = [...filteredGraphs];
     };
 
-    const extractTableFilters = () => {
-        let fltrs = new Map();
-        graphs.forEach(graph => {
-            const title = graph.options.plugins.title.text;
-            const parts = title.split("-").slice(0, -1);
-            parts.forEach((part, index) => {
-                const level = index + 1;
-                if (!fltrs.has(level)) {
-                    fltrs.set(level, new Set());
-                }
-                fltrs.get(level).add(part.trim());
-            });
-        });
-        tableFilters = Array.from(fltrs.entries()).sort((a, b) => a[0] - b[0]).map(entry => ({
-            level: entry[0],
-            items: Array.from(entry[1])
-        }));
-    };
-
-    const extractColumnFilters = () => {
-        let fltrs = new Set();
-        graphs.forEach(graph => {
-            const title = graph.options.plugins.title.text;
-            const parts = title.split("-").slice(-1);
-            parts.forEach(part => {
-                fltrs.add(part.trim());
-            });
-        });
-        columnFilters = Array.from(fltrs);
-    };
-
-    const toggleTableFilter = (filterName, level) => {
-        const currentFilter = selectedTableFilters.find(f => f.level === level);
-        if (currentFilter && currentFilter.name === filterName) {
-            selectedTableFilters = selectedTableFilters.filter(f => f.level !== level);
-        } else {
-            selectedTableFilters = [
-                ...selectedTableFilters.filter(f => f.level !== level),
-                {name: filterName, level}
-            ];
-        }
-        filterGraphs();
-    };
-
-    const toggleColumnFilter = (filterName) => {
-        if (selectedColumnFilters.includes(filterName)) {
-            selectedColumnFilters = selectedColumnFilters.filter(f => f !== filterName);
-        } else {
-            selectedColumnFilters = [...selectedColumnFilters, filterName];
-        }
-        filterGraphs();
-    };
-
-    const filterGraphs = () => {
-        if (selectedTableFilters.length === 0 && selectedColumnFilters.length === 0) {
-            filteredGraphs = graphs.map(graph => ({...graph, id: generateRandomHash()}));
-        } else {
-            filteredGraphs = graphs
-                .filter(graph => {
-                    const title = graph.options.plugins.title.text;
-                    const parts = title.split("-").map(part => part.trim());
-                    const matchesTableFilters = selectedTableFilters.every(filter => parts.includes(filter.name));
-                    const matchesColumnFilters = selectedColumnFilters.length === 0
-                        || selectedColumnFilters.some(filter => parts.includes(filter));
-                    return matchesTableFilters && matchesColumnFilters;
-                })
-                .map(graph => ({...graph, id: generateRandomHash()}));
-        }
-    };
-
-    const getTableFilterColor = (level) => {
-        const intermediateColors = [
-            "#B8EFFF",
-            "#FECBA1",
-            "#D6B3E6",
-            "#FFE699",
-            "#F0A5C5",
-            "#C4C8CA",
-        ];
-        return intermediateColors[level - 1 % intermediateColors.length];
-    };
-
-    const toggleReleaseFilter = (filterName) => {
-        releasesFilters[filterName] = !releasesFilters[filterName];
-        filterGraphs();
-    };
-
-    onMount(() => {
-        // setDefaultDateRange();
-        // fetchTestResults(test_id);
-    });
 </script>
 
 <GraphFilters
@@ -178,51 +207,31 @@
         on:releaseChange={handleReleaseChange}
 />
 
-<span>Filters:</span>
-<div class="filters-container  ">
-    <div class="input-group input-group-inline input-group-sm mx-1">
-        <button class="btn btn-outline-dark colored"
-                on:click={() => { selectedTableFilters = []; filterGraphs(); }}>X
-        </button>
-    </div>
-    {#each tableFilters as filterGroup}
-        <div class="input-group input-group-inline  input-group-sm mx-1">
-            {#each filterGroup.items as filter}
-                <button class="btn btn-outline-dark colored"
-                        on:click={() => toggleTableFilter(filter, filterGroup.level)}
-                        class:selected={selectedTableFilters.some(f => f.name === filter)}
-                        style="background-color: {getTableFilterColor(filterGroup.level)}"
-                >
-                    {filter}
-                </button>
-            {/each}
-        </div>
-
+<ul class="nav nav-tabs mb-3">
+    {#each allTabs as t, i}
+        <li class="nav-item">
+            <a class="nav-link {activeTab === i ? 'active' : ''}" on:click={() => handleTabClick(i)}>{t}</a>
+        </li>
     {/each}
-</div>
-<span>Metrics:</span>
-<div class="filters-container  ">
-    <div class="input-group input-group-inline  input-group-sm mx-1">
-        <button class="btn btn-outline-dark colored"
-                on:click={() => { selectedColumnFilters = []; filterGraphs(); }}>X
-        </button>
-    </div>
-    <div class="input-group input-group-inline  input-group-sm mx-1">
-        {#each columnFilters as filter}
-            <button class="btn btn-outline-dark colored"
-                    on:click={() => toggleColumnFilter(filter)}
-                    class:selected={selectedColumnFilters.some(f => f === filter)}
-                    style="background-color: #a3e2cc"
-            >
-                {filter}
-            </button>
-        {/each}
-    </div>
-</div>
+</ul>
+<h5 class="text-center">{graphViews[activeTab - 1]?.description || "All graphs"}</h5>
+{#key graphs}
+    <Filters {graphs} bind:filteredGraphs/>
+{/key}
 <div class="charts-container">
+    {#key filteredGraphs}
     {#each filteredGraphs as graph (graph.id)}
         <div class="chart-container"
              class:big-size={filteredGraphs.length < 2}>
+            {#if activeTab === 0}
+                    <button class="add-btn" on:click={() => openAddGraphModal(graph)} title="add to graph view">
+                        <Fa icon={faPlus}/>
+                    </button>
+                {:else}
+                    <button class="add-btn" on:click={() => openRemoveGraphModal(graph)} title="Remove from graph view">
+                        <Fa icon={faMinus}/>
+                    </button>
+                {/if}
             <ResultsGraph
                     {graph}
                     {ticks}
@@ -235,7 +244,83 @@
             />
         </div>
     {/each}
+        {/key}
 </div>
+
+{#if showModal}
+    <div class="modal show d-block" tabindex="-1" role="dialog" on:click={closeModal}>
+        <div class="modal-dialog" role="document" on:click|stopPropagation>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">New View</h5>
+                    <button type="button" class="close" on:click={closeModal}>&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input class="form-control" type="text" bind:value={form.name}/>
+                    </div>
+                    <div class="form-group">
+                        <label>Description</label>
+                        <textarea class="form-control" bind:value={form.description}></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" on:click={saveNewView}>Save</button>
+                    <button type="button" class="btn btn-secondary" on:click={closeModal}>Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+{/if}
+
+{#if showAddGraphModal}
+    <div class="modal show d-block" tabindex="-1" role="dialog" on:click={closeAddGraphModal}>
+        <div class="modal-dialog" role="document" on:click|stopPropagation>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add Graph to View</h5>
+                    <button type="button" class="close" on:click={closeAddGraphModal}>&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Select Graph View</label>
+                        <select class="form-control" bind:value={selectedView}>
+                            <option value="" disabled>Select a view</option>
+                            {#each graphViews as v}
+                                <option value={v.name}>{v.name}</option>
+                            {/each}
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" on:click={addGraphToView}>Add</button>
+                    <button class="btn btn-secondary" on:click={closeAddGraphModal}>Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+{/if}
+
+{#if showRemoveGraphModal}
+    <div class="modal show d-block" tabindex="-1" role="dialog" on:click={closeRemoveGraphModal}>
+        <div class="modal-dialog" role="document" on:click|stopPropagation>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Remove Graph?</h5>
+                    <button type="button" class="close" on:click={closeRemoveGraphModal}>&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p>Remove <strong>{selectedGraph?.options?.plugins?.title?.text}</strong> from this view?</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-danger" on:click={removeGraph}>Remove</button>
+                    <button class="btn btn-secondary" on:click={closeRemoveGraphModal}>Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+{/if}
 
 <style>
     .charts-container {
@@ -250,31 +335,26 @@
         justify-content: center;
         align-items: center;
         margin: 10px;
+        position: relative;
     }
 
     .big-size {
         width: 90%;
     }
 
-    .filters-container {
-        display: flex;
-        flex-direction: row;
-        justify-content: flex-start;
-        align-content: flex-start;
-        margin-bottom: 20px;
-        flex-wrap: wrap;
+    .add-btn {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: #888;
+        font-size: 1.2em;
+        z-index: 1000;
     }
 
-    .input-group-inline {
-        width: auto;
-    }
-
-
-    button.colored:not(.selected):not(:hover) {
-        background-color: #f0f0f0 !important;
-    }
-
-    .date-input {
-        max-width: 200px;
+    .add-btn:hover {
+        color: #333;
     }
 </style>
